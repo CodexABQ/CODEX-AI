@@ -16,6 +16,9 @@ plugins/*
 !plugins/autoleave.js
 !plugins/qr-tools.js
 
+# Marketplace product photos/videos (runtime data)
+media/
+
 # Secrets / environment
 .env
 .env.*
