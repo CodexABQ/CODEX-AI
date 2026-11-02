@@ -9,14 +9,14 @@ module.exports = {
         const start = Date.now();
 
         // Send initial "PINGING..." message
-        const pingMsg = await reply('_❦  PINGING..._');
+        const pingMsg = await reply('_dex is checking speed..._');
 
         const ms = Date.now() - start;
 
-        // Edit the message to "PONG!" with ms
+        // Distinctive reply — unique to CodexABQ fork so you know updates landed
         await sock.sendMessage(m.chat, {
             edit: pingMsg.key,
-            text: '_☙  PONG! ' +  ms + 'ms_'
+            text: `_dex online_ ⚡ *${ms}ms*\n_no stress, we dey sharp_ `
         });
     }
 };
