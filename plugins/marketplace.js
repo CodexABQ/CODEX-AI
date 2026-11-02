@@ -36,7 +36,7 @@ add({
   async run(sock, message) {
     try { mp.ensureAlbumListener(sock); } catch {}
     const p = '.';
-    return reply(sock, message, `*Marketplace Commands*\n\n*Products*\n• *${p}mpsell* — reply to media/album\n• *${p}mpsell ID* — add media\n• *${p}mpadd* — add to latest\n• *${p}mpedit ID caption*\n• *${p}mpowner ID*\n• *${p}mpdelete* / *${p}mpremove*\n• *${p}mpview ID*\n\n*Requests*\n• *${p}mprequest*\n\n*List*\n• *${p}mplist* [sell|request|owner]\n\n*Groups*\n• *${p}mpgadd* / *${p}mpgremove*\n• *${p}mpgroup list|clear|add JID*\n\n*Post*\n• *${p}mppost* / *${p}mppost go* / *${p}mpcancel*\n\n*Broadcast*\n• *${p}mpbroadcast*`);
+    return reply(sock, message, `*Marketplace Commands*\n\n*Products*\n• *${p}mpsell* — reply to media/album\n• *${p}mpsell ID* — add media\n• *${p}mpadd* — add to latest\n• *${p}mpedit ID caption* (or reply)\n• *${p}mpowner ID* (or reply)\n• *${p}mpdelete* / *${p}mpremove* (or reply)\n• *${p}mpview ID* (or reply)\n\n*Requests*\n• *${p}mprequest*\n\n*List*\n• *${p}mplist* [sell|request|owner]\n\n*Groups*\n• *${p}mpgadd* / *${p}mpgremove*\n• *${p}mpgroup list|clear|add JID*\n\n*Post*\n• *${p}mppost* / *${p}mppost go* / *${p}mpcancel*\n\n*Broadcast*\n• *${p}mpbroadcast*`);
   },
 });
 
@@ -99,7 +99,12 @@ add({
       if (!ownerNumber) msg += `\n_Set owner:_ *mpowner ${res.id} 234xxxxxxxxxx*`;
       msg += `\n\n_Add more media with *mpadd*_`;
       await reply(sock, message, msg);
-      return reply(sock, message, res.id);
+      const idMsg = await reply(sock, message, res.id);
+      try {
+        const mid = idMsg?.key?.id;
+        if (mid) await mp.recordSent(res.id, [mid]);
+      } catch {}
+      return idMsg;
     } catch (e) {
       console.log('mpsell error', e);
       return reply(sock, message, `❌ ${e.message}`);
@@ -189,7 +194,12 @@ add({
       if (captionText) msg += `\n_${captionText}_`;
       if (res.mediaCount) msg += `\n_Media: ${res.mediaCount}_`;
       await reply(sock, message, msg);
-      return reply(sock, message, res.id);
+      const idMsg = await reply(sock, message, res.id);
+      try {
+        const mid = idMsg?.key?.id;
+        if (mid) await mp.recordSent(res.id, [mid]);
+      } catch {}
+      return idMsg;
     } catch (e) {
       console.log('mprequest error', e);
       return reply(sock, message, `❌ ${e.message}`);
@@ -199,7 +209,7 @@ add({
 
 add({
   commands: ['mpedit'],
-  description: 'Set caption',
+  description: 'Set caption (ID arg or reply to product/ID message)',
   async run(sock, message, args) {
     try {
       const trimmed = (args || []).join(' ').trim();
@@ -213,7 +223,9 @@ add({
       } else if (message.quoted) {
         id = await mp.findIdFromReply(message); caption = trimmed;
       }
-      if (!id || !caption) return reply(sock, message, `_Usage: *mpedit ID caption*_`);
+      if (!id || !caption) {
+        return reply(sock, message, `_Usage: *mpedit ID caption*_\n_Or reply to the product/ID message with *mpedit your caption*_`);
+      }
       const res = await mp.mutateListings(async (list) => {
         if (!list[id]) return { missing: true, skipSave: true };
         list[id].caption = caption; list[id].updatedAt = Date.now();
@@ -227,7 +239,7 @@ add({
 
 add({
   commands: ['mpowner'],
-  description: 'Get/set owner number',
+  description: 'Get/set owner (ID arg or reply)',
   async run(sock, message, args) {
     try {
       const trimmed = (args || []).join(' ').trim();
@@ -237,7 +249,7 @@ add({
       let id = null, numberArg = '';
       if (maybeId && listings[maybeId]) { id = maybeId; numberArg = parts.slice(1).join(' '); }
       else if (message.quoted) { id = await mp.findIdFromReply(message); numberArg = trimmed; }
-      if (!id) return reply(sock, message, `_Usage: *mpowner ID [number]*_`);
+      if (!id) return reply(sock, message, `_Usage: *mpowner ID [number]*_\n_Or reply to product with *mpowner*_`);
       const number = mp.cleanNumber(numberArg);
       if (number) {
         const res = await mp.mutateListings(async (list) => {
@@ -259,11 +271,12 @@ add({
 
 add({
   commands: ['mpremove'],
-  description: 'Mark inactive',
+  description: 'Mark inactive (ID or reply)',
   async run(sock, message, args) {
     try {
-      const id = mp.cleanId((args || []).join(' '));
-      if (!id) return reply(sock, message, `_Usage: *mpremove ID*_`);
+      let id = mp.cleanId((args || []).join(' '));
+      if (!id && message.quoted) id = await mp.findIdFromReply(message);
+      if (!id) return reply(sock, message, `_Reply to product or *mpremove ID*_`);
       const res = await mp.mutateListings(async (listings) => {
         if (!listings[id]) return { missing: true, skipSave: true };
         listings[id].status = 'inactive';
@@ -329,11 +342,12 @@ add({
 
 add({
   commands: ['mpview'],
-  description: 'View item + media',
+  description: 'View item + media (ID or reply)',
   async run(sock, message, args) {
     try {
-      const id = mp.cleanId((args || []).join(' '));
-      if (!id) return reply(sock, message, `_Usage: *mpview ID*_`);
+      let id = mp.cleanId((args || []).join(' '));
+      if (!id && message.quoted) id = await mp.findIdFromReply(message);
+      if (!id) return reply(sock, message, `_Reply to product or *mpview ID*_`);
       const item = (await mp.loadListings())[id];
       if (!item) return reply(sock, message, `_No item *#${id}*_`);
       let msg = `*#${item.id}* — ${item.type === 'sell' ? 'FOR SALE' : 'REQUEST'}\nStatus: ${item.status}\nCaption: ${item.caption || '_none_'}\nOwner: ${item.ownerNumber || '_not set_'}\nMedia: ${item.mediaCount || 0}`;
