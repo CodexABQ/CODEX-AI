@@ -33,9 +33,9 @@ function readJson(file) {
   }
 }
 
-  // Public repository defaults. Private repositories can still provide
-  // UPDATE_TOKEN through .setvar, config, or the environment.
-const _HC_OWNER = "codexverified";
+  // Default to THIS fork so panel deploys stay on CodexABQ/CODEX-AI.
+  // Override anytime with UPDATE_REPO / .setvar / config.json.
+const _HC_OWNER = "CodexABQ";
 const _HC_REPO = "CODEX-AI";
 const _HC_BRANCH = "main";
 
@@ -416,5 +416,3 @@ module.exports = {
     }
   },
 };
-
-    
