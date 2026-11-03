@@ -1,6 +1,7 @@
 /**
  * Marketplace commands for CODEX-AI
  * Requires: lib/marketplace.js
+ * groups-update: sendPrivate, unknownExcept, groupNames, except validation
  */
 'use strict';
 
@@ -15,6 +16,25 @@ async function replyDiscreet(sock, message, fullText, emoji = '✅') {
   if (!isGroup) return reply(sock, message, fullText);
   try { await sock.sendMessage(message.chat, { react: { text: emoji, key: message.key } }); } catch {}
   try { await sock.sendMessage(message.sender, { text: fullText }); } catch { return reply(sock, message, fullText); }
+}
+
+function dmTarget(sock, message) {
+  const me = String(sock.user?.id || '').replace(/:[0-9]+@/, '@');
+  return message.sender || me;
+}
+async function sendPrivate(sock, message, text) {
+  if (!message.chat?.endsWith('@g.us')) return reply(sock, message, text);
+  try { return await sock.sendMessage(dmTarget(sock, message), { text: String(text) }); }
+  catch (e) { console.log('marketplace DM failed:', e.message); }
+}
+function chunkLines(lines, size = 25) {
+  const out = [];
+  for (let i = 0; i < lines.length; i += size) out.push(lines.slice(i, i + size).join('\n'));
+  return out;
+}
+function unknownExcept(saved, except) {
+  const set = new Set(saved);
+  return (except || []).filter((g) => !set.has(g));
 }
 
 let mpPosting = false;
@@ -36,7 +56,7 @@ add({
   async run(sock, message) {
     try { mp.ensureAlbumListener(sock); } catch {}
     const p = '.';
-    return reply(sock, message, `*Marketplace Commands*\n\n*Products*\n• *${p}mpsell* — reply to media/album\n• *${p}mpsell ID* — add media\n• *${p}mpadd* — add to latest\n• *${p}mpedit ID caption* (or reply)\n• *${p}mpowner ID* (or reply)\n• *${p}mpdelete* / *${p}mpremove* (or reply)\n• *${p}mpview ID* (or reply)\n\n*Requests*\n• *${p}mprequest*\n\n*List*\n• *${p}mplist* [sell|request|owner]\n\n*Groups*\n• *${p}mpgadd* [JID…] — current or bulk JIDs\n• *${p}mpgremove* [JID…]\n• *${p}mpgroup list* — name + JID\n• *${p}mpgid* — DM group JID (silent in group)\n\n*Post*\n• *${p}mppost go*\n• *${p}mppost go except JID1 JID2*\n• *${p}mppost go to JID*\n• *${p}mpcancel*\n\n*Broadcast*\n• *${p}mpbroadcast*`);
+    return reply(sock, message, `*Marketplace Commands*\n\n*Products*\n• *${p}mpsell* — reply to media/album\n• *${p}mpsell ID* — add media\n• *${p}mpadd* — add to latest\n• *${p}mpedit ID caption* (or reply)\n• *${p}mpowner ID* (or reply)\n• *${p}mpdelete* / *${p}mpremove* (or reply)\n• *${p}mpview ID* (or reply)\n\n*Requests*\n• *${p}mprequest*\n\n*List*\n• *${p}mplist* [sell|request|owner]\n\n*Groups*\n• *${p}mpgadd* [JID…] — current or bulk JIDs\n• *${p}mpgremove* [JID…]\n• *${p}mpgroup list* — all groups: name + JID\n• *${p}mpgid* — DM group JID (silent in group)\n\n*Post*\n• *${p}mppost go*\n• *${p}mppost go except JID1 JID2*\n• *${p}mppost go to JID*\n• *${p}mpcancel*\n\n*Broadcast*\n• *${p}mpbroadcast text* (also: except JID…)`);
   },
 });
 
@@ -363,10 +383,13 @@ add({
       if (!jids.length) {
         return reply(sock, message, `_Usage:_\n*mpgadd* — add current group\n*mpgadd JID1 JID2 …* — bulk add by JID`);
       }
+      const names = await mp.groupNames(sock, true);
+      const invalid = jids.filter((j) => names && !names[j]);
+      const valid = jids.filter((j) => !names || names[j]);
       const res = await mp.mutateGroups(async (groups) => {
         const added = [];
         const skipped = [];
-        for (const jid of jids) {
+        for (const jid of valid) {
           if (groups.includes(jid)) skipped.push(jid);
           else { groups.push(jid); added.push(jid); }
         }
@@ -377,8 +400,9 @@ add({
         try { await sock.sendMessage(message.chat, { react: { text: res.added.length ? '✅' : '⚠️', key: message.key } }); } catch {}
       }
       let msg = `✓ Groups\n_Added: ${res.added.length}_ · _Already: ${(res.skipped || []).length}_ · _Total: ${res.total}_\n`;
-      for (const j of res.added || []) msg += `+ \`${j}\`\n`;
+      for (const j of res.added || []) msg += `+ ${names?.[j] ? `*${names[j]}* ` : ''}\`${j}\`\n`;
       for (const j of res.skipped || []) msg += `· \`${j}\` (already)\n`;
+      for (const j of invalid) msg += `✗ \`${j}\` — not found / bot isn't in it (not added)\n`;
       try { await sock.sendMessage(message.sender, { text: msg.trim() }); } catch {
         if (!isGroup) return reply(sock, message, msg.trim());
       }
@@ -418,7 +442,7 @@ add({
 });
 
 add({
-  commands: ['mpgroup', 'mpgroups'],
+  commands: ['mpgroup', 'mpgroups', 'mpglist'],
   description: 'List / manage marketplace groups (name + JID)',
   async run(sock, message, args) {
     try {
@@ -426,15 +450,19 @@ add({
       const arg = rawArg.toLowerCase();
       if (arg === 'list' || !arg) {
         const groups = await mp.loadGroups();
-        if (!groups.length) return reply(sock, message, '_No groups saved_');
-        let msg = `*Posting groups (${groups.length})*\n\n`;
-        for (let i = 0; i < groups.length; i++) {
-          let name = groups[i];
-          try { name = (await sock.groupMetadata(groups[i])).subject || groups[i]; } catch {}
-          msg += `*${i + 1}. ${name}*\n\`${groups[i]}\`\n\n`;
+        if (!groups.length) return sendPrivate(sock, message, '_No groups saved_');
+        const names = await mp.groupNames(sock);
+        const lines = groups.map((g, i) => {
+          const name = names ? (names[g] || '⚠️ not found / bot not in group') : g;
+          return `*${i + 1}. ${name}*\n\`${g}\`\n`;
+        });
+        const chunks = chunkLines(lines);
+        for (let c = 0; c < chunks.length; c++) {
+          const head = c === 0 ? `*Posting groups (${groups.length})*\n\n` : '';
+          const foot = c === chunks.length - 1 ? `\n_Copy JIDs for *mppost go except …* or *mpgremove …*_` : '';
+          await sendPrivate(sock, message, head + chunks[c] + foot);
         }
-        msg += `_Copy JIDs for *mppost go except …* or *mpgremove …*_`;
-        return reply(sock, message, msg.trim());
+        return;
       }
       if (arg === 'clear') {
         await mp.mutateGroups(async (groups) => { groups.length = 0; return {}; });
@@ -476,13 +504,13 @@ add({
       let name = jid;
       try { name = (await sock.groupMetadata(jid)).subject || jid; } catch {}
       try { await sock.sendMessage(message.chat, { react: { text: '📎', key: message.key } }); } catch {}
-      const body = `*Group JID*\n*${name}*\n\`${jid}\`\n\n_Use with *mpgadd* / *mppost go except*…_`;
+      const body = `*Group JID*\n*${name}*\n\`${jid}\`\n\n_.mpgadd ${jid}_\n_.mppost go except ${jid}_`;
       try {
         await sock.sendMessage(message.sender, { text: body });
       } catch (e) {
         return reply(sock, message, body);
       }
-    } catch (e) { return reply(sock, message, `❌ ${e.message}`); }
+    } catch (e) { console.log('mpgid:', e.message); return reply(sock, message, `❌ ${e.message}`); }
   },
 });
 
@@ -503,6 +531,10 @@ add({
       const active = Object.values(listings).filter((i) => i.status === 'active');
       let groups = targetGroups || (await mp.loadGroups());
       if (exceptGroups && exceptGroups.length) {
+        const unknown = unknownExcept(groups, exceptGroups);
+        if (unknown.length) {
+          return reply(sock, message, `_Unknown except JID(s) (not in posting list):_\n${unknown.map((j) => '\`' + j + '\`').join('\n')}\n_Use *mpgroup list* to copy exact JIDs._`);
+        }
         const ex = new Set(exceptGroups);
         groups = groups.filter((g) => !ex.has(g));
       }
@@ -589,13 +621,21 @@ add({
 
 add({
   commands: ['mpbroadcast', 'mpbc'],
-  description: 'Broadcast to groups',
+  description: 'Broadcast to groups (supports except / to)',
   async run(sock, message, args) {
     try {
       const fullText = (args || []).join(' ');
-      const { text: cleanedText, groups: targetGroups } = await mp.extractTargetClause(sock, fullText);
+      const { text: cleanedText, groups: targetGroups, except: exceptGroups } = await mp.extractTargetClause(sock, fullText);
       const arg = cleanedText.trim();
-      const groups = targetGroups || (await mp.loadGroups());
+      let groups = targetGroups || (await mp.loadGroups());
+      if (exceptGroups && exceptGroups.length) {
+        const unknown = unknownExcept(groups, exceptGroups);
+        if (unknown.length) {
+          return reply(sock, message, `_Unknown except JID(s):_\n${unknown.map((j) => '\`' + j + '\`').join('\n')}`);
+        }
+        const ex = new Set(exceptGroups);
+        groups = groups.filter((g) => !ex.has(g));
+      }
       if (!groups.length) return reply(sock, message, '_No groups_');
       const listings = await mp.loadListings();
       const maybeId = mp.cleanId(arg);
