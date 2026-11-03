@@ -412,7 +412,9 @@ add({
         if (!groups.length) return reply(sock, message, '_No groups_');
         let msg = `*Groups (${groups.length})*\n\n`;
         for (let i = 0; i < groups.length; i++) {
-          msg += `${i + 1}. \`${groups[i]}\`\n`;
+          let name = groups[i];
+          try { name = (await sock.groupMetadata(groups[i])).subject || groups[i]; } catch {}
+          msg += `${i + 1}. ${name}\n\`${groups[i]}\`\n\n`;
         }
         return reply(sock, message, msg.trim());
       }
@@ -421,29 +423,33 @@ add({
         return reply(sock, message, '_Groups cleared_');
       }
       if (arg.startsWith('add ')) {
-        const jids = mp.extractJids(rawArg.slice(4));
-        if (!jids.length) return reply(sock, message, '_Usage: *mpgroup add JID1 JID2*_');
+        const jids = [...new Set(mp.extractJids(rawArg.slice(4)))];
+        if (!jids.length) return reply(sock, message, `_Usage: *mpgroup add JID*_`);
         const res = await mp.mutateGroups(async (groups) => {
-          let added = 0;
-          for (const j of jids) {
-            if (!groups.includes(j)) { groups.push(j); added++; }
-          }
-          return { added, total: groups.length };
+          const added = [];
+          for (const jid of jids) { if (!groups.includes(jid)) { groups.push(jid); added.push(jid); } }
+          return { skipSave: !added.length, added, total: groups.length };
         });
-        return reply(sock, message, `✓ Added ${res.added}, total ${res.total}`);
+        return reply(sock, message, `✓ Added *${res.added.length}* — total ${res.total}`);
       }
       if (arg.startsWith('remove ')) {
-        const jids = mp.extractJids(rawArg.slice(7));
-        if (!jids.length) return reply(sock, message, '_Usage: *mpgroup remove JID*_');
+        const jids = [...new Set(mp.extractJids(rawArg.slice(7)))];
         const res = await mp.mutateGroups(async (groups) => {
-          let removed = 0;
-          for (const j of jids) {
-            const idx = groups.indexOf(j);
-            if (idx !== -1) { groups.splice(idx, 1); removed++; }
-          }
-          return { removed, total: groups.length };
+          let n = 0;
+          for (const jid of jids) { const i = groups.indexOf(jid); if (i !== -1) { groups.splice(i, 1); n++; } }
+          return { skipSave: !n, removedCount: n, total: groups.length };
         });
-        return reply(sock, message, `✓ Removed ${res.removed}, total ${res.total}`);
+        return reply(sock, message, `✓ Removed *${res.removedCount}* — total ${res.total}`);
+      }
+      if (arg === 'add') {
+        if (!message.chat.endsWith('@g.us')) return reply(sock, message, '_Use inside a group_');
+        const res = await mp.mutateGroups(async (groups) => {
+          if (groups.includes(message.chat)) return { exists: true, skipSave: true };
+          groups.push(message.chat);
+          return { total: groups.length };
+        });
+        if (res.exists) return reply(sock, message, '_Already added_');
+        return reply(sock, message, `✓ Added — total ${res.total}`);
       }
       return reply(sock, message, '_Usage: *mpgroup list|clear|add JID|remove JID*_');
     } catch (e) { return reply(sock, message, `❌ ${e.message}`); }
@@ -485,7 +491,6 @@ add({
           toPost = parts.map((p) => listings[mp.cleanId(p)]).filter((i) => i && i.status === 'active');
           if (!toPost.length) return reply(sock, message, '_No matching active items_');
         }
-        // optional: to JID handled inside extractTarget if needed later
       } else if (arg !== 'go') {
         return reply(sock, message, '_Usage: *mppost* | *mppost go* | *mppost go ID* | *mpcancel*_');
       }
@@ -530,65 +535,46 @@ add({
 
 add({
   commands: ['mpcancel'],
-  description: 'Cancel an mppost run',
+  description: 'Cancel posting',
   async run(sock, message) {
-    if (!mpPosting) return reply(sock, message, '_Nothing posting_');
+    if (!mpPosting) return reply(sock, message, '_No run in progress_');
     mpCancelRequested = true;
-    return reply(sock, message, '_Cancel requested_');
+    return reply(sock, message, '_Cancelling..._');
   },
 });
 
 add({
-  commands: ['mpbroadcast'],
-  description: 'Broadcast text/media/listing to marketplace groups',
+  commands: ['mpbroadcast', 'mpbc'],
+  description: 'Broadcast to groups',
   async run(sock, message, args) {
     try {
-      try { mp.ensureAlbumListener(sock); } catch {}
-      const groups = await mp.loadGroups();
+      const fullText = (args || []).join(' ');
+      const { text: cleanedText, groups: targetGroups } = await mp.extractTargetClause(sock, fullText);
+      const arg = cleanedText.trim();
+      const groups = targetGroups || (await mp.loadGroups());
       if (!groups.length) return reply(sock, message, '_No groups_');
-      const raw = (args || []).join(' ').trim();
-      const { text, groups: targetGroups } = await mp.extractTargetClause(sock, raw);
-      const dest = targetGroups || groups;
-
-      let files = [];
-      let caption = text || '';
-      let existing = null;
-
-      if (text) {
-        const id = mp.cleanId(text.split(/\s+/)[0] || '');
-        const listings = await mp.loadListings();
-        if (listings[id]) {
-          existing = listings[id];
-          files = await mp.resolveItemMedia(existing);
-          caption = mp.buildPostCaption(existing);
-        }
-      }
-      if (!files.length && mp.hasMediaInput(message)) {
+      const listings = await mp.loadListings();
+      const maybeId = mp.cleanId(arg);
+      const existing = arg && listings[maybeId] ? listings[maybeId] : null;
+      let files = [], caption = '';
+      if (existing) { files = await mp.resolveItemMedia(existing); caption = existing.caption || ''; }
+      else if (mp.hasMediaInput(message)) {
         files = await mp.downloadMedia(sock, message);
-        if (!caption) caption = message.quoted?.caption || message.quoted?.text || '';
-      }
-      if (!files.length && !caption) {
-        return reply(sock, message, `_Usage: *mpbroadcast text* | reply media | *mpbroadcast ID*_`);
-      }
-
-      await reply(sock, message, `_Broadcasting to *${dest.length}* group(s)..._`);
+        caption = arg || message.quoted?.text || '';
+      } else caption = arg;
+      if (!files.length && !caption) return reply(sock, message, `_Usage: *mpbroadcast text*_`);
+      await reply(sock, message, `_Broadcasting to ${groups.length} group(s)..._`);
       let ok = 0, fail = 0;
-      for (let gi = 0; gi < dest.length; gi++) {
+      for (const g of groups) {
         try {
-          const sentIds = await mp.sendPost(sock, dest[gi], files, caption);
-          if (existing) await mp.recordSent(existing.id, sentIds);
+          const ids = await mp.sendPost(sock, g, files, caption);
+          if (existing) await mp.recordSent(existing.id, ids);
           ok++;
-        } catch (e) {
-          fail++;
-          console.log('mpbroadcast', e.message);
-        }
-        if (gi < dest.length - 1) await mp.sleep(mp.randomBetween(mp.GROUP_DELAY));
+        } catch { fail++; }
+        await mp.sleep(mp.randomBetween(mp.GROUP_DELAY));
       }
-      return reply(sock, message, `✓ Broadcast done — ok ${ok}, fail ${fail}`);
-    } catch (e) {
-      console.log('mpbroadcast error', e);
-      return reply(sock, message, `❌ ${e.message}`);
-    }
+      return reply(sock, message, `✓ Sent ${ok}, failed ${fail}`);
+    } catch (e) { return reply(sock, message, `❌ ${e.message}`); }
   },
 });
 
