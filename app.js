@@ -1,7 +1,7 @@
 'use strict';
 /**
- * Temporary bootstrap: restore full app.js body from last known-good commit
- * if this file was overwritten, then apply statusWatch hook and re-export.
+ * Bootstrap: restore full app.js body from last known-good commit,
+ * then install statusWatch + vvCmd hooks and re-export.
  */
 const fs = require('fs');
 const path = require('path');
@@ -21,21 +21,34 @@ function ensureBody() {
 
 ensureBody();
 
-// Patch body once: install statusWatchHook after MessageHandler construction
-try {
+function patchHooks() {
   let text = fs.readFileSync(BODY, 'utf8');
-  if (!text.includes('statusWatchHook')) {
-    const needle = 'this.messageHandler = new MessageHandler(this);';
-    const insert =
+  let dirty = false;
+
+  const needle = 'this.messageHandler = new MessageHandler(this);';
+  if (text.includes(needle) && !text.includes("statusWatchHook').install")) {
+    text = text.replace(
+      needle,
       needle +
-      "\n    try { require('./lib/statusWatchHook').install(this); } catch (e) { console.log('[statusWatch] hook:', e.message); }";
-    if (text.includes(needle)) {
-      text = text.replace(needle, insert);
-      fs.writeFileSync(BODY, text);
-    }
+        "\n    try { require('./lib/statusWatchHook').install(this); } catch (e) { console.log('[statusWatch] hook:', e.message); }" +
+        "\n    try { require('./lib/vvCmdHook').install(this); } catch (e) { console.log('[vvCmd] hook:', e.message); }"
+    );
+    dirty = true;
+  } else if (text.includes("statusWatchHook').install") && !text.includes("vvCmdHook').install")) {
+    text = text.replace(
+      "try { require('./lib/statusWatchHook').install(this); } catch (e) { console.log('[statusWatch] hook:', e.message); }",
+      "try { require('./lib/statusWatchHook').install(this); } catch (e) { console.log('[statusWatch] hook:', e.message); }\n    try { require('./lib/vvCmdHook').install(this); } catch (e) { console.log('[vvCmd] hook:', e.message); }"
+    );
+    dirty = true;
   }
+
+  if (dirty) fs.writeFileSync(BODY, text);
+}
+
+try {
+  patchHooks();
 } catch (e) {
-  console.log('[app bootstrap] patch skipped:', e.message);
+  console.log('[app bootstrap] hook patch skipped:', e.message);
 }
 
 module.exports = require('./_app_body.js');
