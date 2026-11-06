@@ -50,7 +50,7 @@ function patchHooks() {
         "\n    try { require('./lib/vvCmdHook').install(this); } catch (e) { console.log('[vvCmd] hook:', e.message); }"
     );
     dirty = true;
-  } soft if (
+  } else if (
     text.includes("statusWatchHook').install") &&
     !text.includes("vvCmdHook').install")
   ) {
