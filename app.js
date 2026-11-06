@@ -1,6 +1,6 @@
 'use strict';
 /**
- * Bootstrap: ensure full app body, patch private-mode (fromMe), install hooks.
+ * Bootstrap: ensure full app body, patch private-mode, restore marketplace if broken, install hooks.
  */
 const fs = require('fs');
 const path = require('path');
@@ -11,6 +11,9 @@ const BODY = path.join(ROOT, '_app_body.js');
 const MH = path.join(ROOT, 'lib', 'messageHandler.js');
 const SOURCE =
   'https://raw.githubusercontent.com/CodexABQ/CODEX-AI/c60fde54cc7623bff996e7e4afcccd581225cf6f/app.js';
+// Last known-good marketplace (before accidental placeholder overwrite)
+const MP_GOOD =
+  'https://raw.githubusercontent.com/CodexABQ/CODEX-AI/950e45946ce715938a4ffa79bad0da80c0b86134';
 
 function ensureBody() {
   if (fs.existsSync(BODY) && fs.statSync(BODY).size > 10000) return;
@@ -18,6 +21,37 @@ function ensureBody() {
     stdio: 'inherit',
     timeout: 90000,
   });
+}
+
+function fileLooksBroken(filePath, minSize) {
+  if (!fs.existsSync(filePath)) return true;
+  const size = fs.statSync(filePath).size;
+  if (size < minSize) return true;
+  try {
+    const head = fs.readFileSync(filePath, 'utf8').slice(0, 80);
+    if (/PLACEHOLDER/i.test(head)) return true;
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+function restoreMarketplace() {
+  const files = [
+    { rel: 'lib/marketplace.js', min: 5000 },
+    { rel: 'plugins/marketplace.js', min: 5000 },
+  ];
+  for (const f of files) {
+    const dest = path.join(ROOT, f.rel);
+    if (!fileLooksBroken(dest, f.min)) continue;
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    console.log('[bootstrap] restoring', f.rel, '...');
+    execSync('curl -fsSL "' + MP_GOOD + '/' + f.rel + '" -o "' + dest + '"', {
+      stdio: 'inherit',
+      timeout: 90000,
+    });
+    console.log('[bootstrap] restored', f.rel, fs.statSync(dest).size, 'bytes');
+  }
 }
 
 function patchPrivateModeFromMe() {
@@ -65,6 +99,7 @@ function patchHooks() {
 }
 
 ensureBody();
+try { restoreMarketplace(); } catch (e) { console.log('[bootstrap] marketplace restore:', e.message); }
 try { patchPrivateModeFromMe(); } catch (e) { console.log('[bootstrap]', e.message); }
 try { patchHooks(); } catch (e) { console.log('[bootstrap] hooks:', e.message); }
 
