@@ -3,25 +3,22 @@ const path = require("path");
 const axios = require("axios");
 const { exec } = require("child_process");
 const util = require("util");
+const execAsync = util.promisify(exec);
 
-const execPromise = util.promisify(exec);
-
-// Anchored to the project root (not process.cwd()) — this is used as the
-// exec() cwd for git/pnpm commands below and as a directory-traversal
-// boundary (see the startsWith(ROOT) check), so it must be the real
-// install directory regardless of the process's launch-time cwd.
-const ROOT = process.env.CODEX_PROJECT_ROOT || path.join(__dirname, "..", "..");
-const VERSION_FILE = path.join(ROOT, ".version");
-const VARS_FILE = path.join(ROOT, "database/variables.json");
+const PROJECT_ROOT = process.env.CODEX_PROJECT_ROOT || path.join(__dirname, "../..");
+const VERSION_FILE = path.join(PROJECT_ROOT, ".version");
+const VARS_FILE = path.join(PROJECT_ROOT, "database", "variables.json");
 
 const SKIP = [
   "node_modules",
   "session",
-  "plugins",
+  // plugins NOT skipped — marketplace.js and other repo plugins must update via .update now
   ".git",
   ".env",
   "config.env",
+  "config.json",
   "database",
+  "media",
   "auth_info_baileys",
 ];
 
@@ -33,8 +30,8 @@ function readJson(file) {
   }
 }
 
-  // Default to THIS fork so panel deploys stay on CodexABQ/CODEX-AI.
-  // Override anytime with UPDATE_REPO / .setvar / config.json.
+// Default to THIS fork so panel deploys stay on CodexABQ/CODEX-AI.
+// Override anytime with UPDATE_REPO / .setvar / config.json.
 const _HC_OWNER = "CodexABQ";
 const _HC_REPO = "CODEX-AI";
 const _HC_BRANCH = "main";
@@ -43,60 +40,58 @@ function getCfg(bot) {
   const vars = readJson(VARS_FILE);
   const repoFull =
     vars.UPDATE_REPO ||
-    bot.config.UPDATE_REPO ||
+    bot?.config?.UPDATE_REPO ||
     process.env.UPDATE_REPO ||
-    process.env.GITHUB_REPOSITORY ||
     `${_HC_OWNER}/${_HC_REPO}`;
-  const [owner, repo] = repoFull.includes("/")
+
+  const [ownerFromRepo, repoFromRepo] = String(repoFull).includes("/")
     ? repoFull.split("/")
     : [
         vars.UPDATE_OWNER ||
-          bot.config.UPDATE_OWNER ||
+          bot?.config?.UPDATE_OWNER ||
           process.env.UPDATE_OWNER ||
           _HC_OWNER,
         vars.UPDATE_NAME ||
           vars.UPDATE_REPO_NAME ||
-          bot.config.UPDATE_NAME ||
-          bot.config.UPDATE_REPO_NAME ||
+          bot?.config?.UPDATE_NAME ||
+          bot?.config?.UPDATE_REPO_NAME ||
           process.env.UPDATE_NAME ||
           process.env.UPDATE_REPO_NAME ||
           _HC_REPO,
       ];
 
-  return {
-    owner,
-    repo,
+  const cfg = {
+    owner: ownerFromRepo || _HC_OWNER,
+    repo: repoFromRepo || _HC_REPO,
     branch:
       vars.UPDATE_BRANCH ||
-      bot.config.UPDATE_BRANCH ||
+      bot?.config?.UPDATE_BRANCH ||
       process.env.UPDATE_BRANCH ||
       _HC_BRANCH,
     token:
       vars.UPDATE_TOKEN ||
-      bot.config.UPDATE_TOKEN ||
+      bot?.config?.UPDATE_TOKEN ||
       process.env.UPDATE_TOKEN ||
-      process.env.GITHUB_TOKEN ||
       "",
   };
-}
 
-function assertCfg(cfg) {
   if (!cfg.owner || !cfg.repo) {
     throw new Error(
       "Update repo is not configured. Set UPDATE_REPO=owner/repo or UPDATE_OWNER and UPDATE_NAME.",
     );
   }
+  return cfg;
 }
 
 function ghHeaders(cfg, raw = false) {
-  const headers = {
-    "User-Agent": "CODEX-AI",
+  const h = {
+    "User-Agent": "CODEX-AI-Updater",
     Accept: raw
-      ? "application/vnd.github.raw"
+      ? "application/vnd.github.v3.raw"
       : "application/vnd.github.v3+json",
   };
-  if (cfg.token) headers.Authorization = `Bearer ${cfg.token}`;
-  return headers;
+  if (cfg.token) h.Authorization = `token ${cfg.token}`;
+  return h;
 }
 
 async function reqJson(cfg, url) {
@@ -162,140 +157,119 @@ async function latestSha(cfg) {
 }
 
 async function checkUpdates(cfg) {
-  assertCfg(cfg);
   const curr = await currentSha(cfg);
   const latest = await latestSha(cfg);
-
   if (curr === latest.sha) {
-    return {
-      upToDate: true,
-      curr: curr.slice(0, 8),
-      latest: latest.sha.slice(0, 8),
-      msg: latest.commit?.message || "",
-    };
+    return { upToDate: true, curr, latest: latest.sha };
   }
 
-  const cmp = await reqJson(
+  const compare = await reqJson(
     cfg,
     `https://api.github.com/repos/${cfg.owner}/${cfg.repo}/compare/${curr}...${latest.sha}`,
   );
+
+  const commits = (compare.commits || []).map((c) => ({
+    hash: c.sha.slice(0, 8),
+    msg: (c.commit?.message || "").split("\n")[0],
+    date: c.commit?.author?.date
+      ? new Date(c.commit.author.date).toISOString().slice(0, 10)
+      : "",
+  }));
+
   return {
     upToDate: false,
     curr: curr.slice(0, 8),
     latest: latest.sha.slice(0, 8),
-    commits: (cmp.commits || []).map((c) => ({
-      hash: c.sha.slice(0, 8),
-      msg: c.commit?.message || "No message",
-      date: c.commit?.author?.date
-        ? new Date(c.commit.author.date).toLocaleDateString()
-        : "",
-    })),
-    totalCommits: (cmp.commits || []).length,
+    totalCommits: compare.total_commits || commits.length,
+    commits: commits.reverse(),
   };
 }
 
 async function applyUpdate(cfg) {
-  assertCfg(cfg);
   const curr = await currentSha(cfg);
   const latest = await latestSha(cfg);
 
   if (curr === latest.sha) {
-    return {
-      ok: true,
-      upToDate: true,
-      curr: curr.slice(0, 8),
-      latest: latest.sha.slice(0, 8),
-      msg: latest.commit?.message || "",
-    };
+    return { upToDate: true, curr: curr.slice(0, 8), latest: latest.sha.slice(0, 8) };
   }
 
-  const cmp = await reqJson(
+  const compare = await reqJson(
     cfg,
     `https://api.github.com/repos/${cfg.owner}/${cfg.repo}/compare/${curr}...${latest.sha}`,
   );
-  const files = cmp.files || [];
-  const commits = (cmp.commits || []).map((c) => ({
+
+  const commits = (compare.commits || []).map((c) => ({
     hash: c.sha.slice(0, 8),
-    msg: c.commit?.message || "No message",
+    msg: (c.commit?.message || "").split("\n")[0],
   }));
 
+  const files = compare.files || [];
   const updated = [];
   const removed = [];
   const skipped = [];
   const failed = [];
+  let needRestart = false;
+  let commandOnly = true;
 
-  for (const file of files) {
-    const name = file.filename;
+  for (const f of files) {
+    const name = f.filename;
     if (isSkipped(name)) {
       skipped.push(name);
       continue;
     }
 
-    const fullPath = path.join(ROOT, name);
-    if (!fullPath.startsWith(ROOT + path.sep)) {
-      failed.push(name);
-      continue;
-    }
-
-    if (file.status === "removed") {
+    if (f.status === "removed") {
       try {
-        await fs.remove(fullPath);
-        removed.push(name);
-      } catch {
-        failed.push(name);
+        const target = path.join(PROJECT_ROOT, name);
+        if (await fs.pathExists(target)) {
+          await fs.remove(target);
+          removed.push(name);
+        }
+      } catch (e) {
+        failed.push(`${name} (${e.message})`);
       }
       continue;
     }
 
     try {
       const url = `https://raw.githubusercontent.com/${cfg.owner}/${cfg.repo}/${latest.sha}/${name}`;
-      const content = await reqBuffer(cfg, url);
-      await fs.ensureDir(path.dirname(fullPath));
-      await fs.writeFile(fullPath, content);
+      const buf = await reqBuffer(cfg, url);
+      const target = path.join(PROJECT_ROOT, name);
+      await fs.ensureDir(path.dirname(target));
+      await fs.writeFile(target, buf);
       updated.push(name);
-    } catch {
-      failed.push(name);
+
+      if (
+        name === "index.js" ||
+        name === "app.js" ||
+        name.startsWith("lib/") ||
+        name === "package.json"
+      ) {
+        needRestart = true;
+        commandOnly = false;
+      }
+      if (!name.startsWith("commands/") && !name.startsWith("plugins/")) {
+        commandOnly = false;
+      }
+    } catch (e) {
+      failed.push(`${name} (${e.message})`);
     }
   }
 
-  if (!failed.length) await fs.writeFile(VERSION_FILE, latest.sha);
-
-  const dependencyChanged = [...updated, ...removed].some((f) =>
-    /(^|\/)package(-lock)?\.json$/.test(f),
-  );
-  if (dependencyChanged && !failed.length) {
-    await execPromise("npm install", {
-      cwd: ROOT,
-      timeout: 180000,
-      maxBuffer: 1024 * 1024,
-    });
-  }
-
-  const changed = [...updated, ...removed];
-  const commandOnly =
-    changed.length > 0 && changed.every((f) => f.startsWith("commands/"));
-  const needRestart = changed.some(
-    (f) =>
-      f === "index.js" ||
-      f === "app.js" ||
-      f === "package.json" ||
-      f === "package-lock.json" ||
-      f.startsWith("lib/"),
-  );
+  await fs.writeFile(VERSION_FILE, latest.sha);
 
   return {
     ok: failed.length === 0,
     upToDate: false,
     curr: curr.slice(0, 8),
     latest: latest.sha.slice(0, 8),
-    commits,
+    commits: commits.reverse(),
     updated,
     removed,
     skipped,
     failed,
-    commandOnly,
     needRestart,
-    total: files.length,
+    commandOnly,
   };
 }
 
@@ -308,12 +282,11 @@ function shortList(items, limit = 8) {
 }
 
 module.exports = {
-  // Used by lib/startupUpdate.js (first-deploy auto update / "Bot is up to date").
   _helpers: { getCfg, checkUpdates, applyUpdate, VERSION_FILE },
   name: "update",
   aliases: ["upd", "upgrade"],
   category: "owner",
-    reactions: { start: '🔐' },
+  reactions: { start: "🔐" },
   description: "Update local files from GitHub API",
   ownerOnly: true,
 
@@ -384,13 +357,13 @@ module.exports = {
 
         if (result.needRestart) {
           await m.reply("Restarting bot...");
-          try { require("../../lib/restartNotice").mark("update", m.chat); } catch {}
+          try {
+            require("../../lib/restartNotice").mark("update", m.chat);
+          } catch {}
           setTimeout(() => process.exit(0), 1000);
           return;
         }
 
-        // No restart needed (only command files / other files changed): the update is
-        // already live, so say the "up to date" message right away.
         const _done = require("../../lib/restartNotice").MESSAGES.update;
 
         if (result.commandOnly && bot.reloader) {
@@ -404,15 +377,15 @@ module.exports = {
 
       return await m.reply(
         `Usage:\n` +
-          `${bot.prefix}update - check updates\n` +
-          `${bot.prefix}update now - apply updates\n\n` +
-          `Config:\n` +
+          `${bot.prefix}update check\n` +
+          `${bot.prefix}update now\n\n` +
+          `Repo: ${cfg.owner}/${cfg.repo} @ ${cfg.branch}\n\n` +
+          `If updates pull from the wrong repo:\n` +
           `${bot.prefix}setvar UPDATE_REPO=owner/repo\n` +
-          `${bot.prefix}setvar UPDATE_BRANCH=master\n` +
-          `${bot.prefix}setvar UPDATE_TOKEN=github_token`,
+          `Example: ${bot.prefix}setvar UPDATE_REPO=CodexABQ/CODEX-AI`,
       );
     } catch (e) {
-      return await m.reply(`Update failed: ${e.message}`);
+      return await m.reply(`Update error: ${e.message}`);
     }
   },
 };
